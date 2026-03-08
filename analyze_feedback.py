@@ -1,7 +1,17 @@
+
+from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.user_credential import UserCredential
 # ============================================
 # PA MOJA AI FEEDBACK ENGINE
 # ============================================
+site_url = "https://safaricomo365.sharepoint.com/sites/CopsFeedback"
 
+username = "rmnyangau@safaricom.co.ke"
+password = "Kijabeimani@12345"
+
+ctx = ClientContext(site_url).with_credentials(
+    UserCredential(username, password)
+)
 import pandas as pd
 import numpy as np
 from textblob import TextBlob
@@ -209,3 +219,40 @@ alerts_df.to_excel("AI_Alerts.xlsx", index=False)
 insight_df.to_excel("AI_Insights.xlsx", index=False)
 
 print("\nAI Processing Complete")
+list_object = ctx.web.lists.get_by_title("AI_Feedback_Insights")
+
+for index, row in df.iterrows():
+
+    item_properties = {
+        "PainPoint": row["PainPoint"],
+        "SampleComments": row["SampleComments"],
+        "Sentiment": row["Sentiment"],
+        "Cluster": row["ClusterLabel"],
+        "Date": str(row["MonthDate"])
+    }
+
+    list_object.add_item(item_properties)
+
+ctx.execute_query()
+
+pred_list = ctx.web.lists.get_by_title("AI_Predictions")
+
+for index, row in predictions_df.iterrows():
+
+    item_properties = {
+        "Cluster": row["Cluster"],
+        "PredictedComplaints": int(row["PredictedComplaints"])
+    }
+
+    pred_list.add_item(item_properties)
+
+ctx.execute_query()
+
+insight_list = ctx.web.lists.get_by_title("AI_Insights")
+
+insight_list.add_item({
+    "Insight": insight,
+    "Date": str(pd.Timestamp.today())
+})
+
+ctx.execute_query()
