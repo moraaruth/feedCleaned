@@ -18,7 +18,7 @@ from sklearn.linear_model import LinearRegression
 
 df = pd.read_excel("feedback.xlsx")
 
-df['Date'] = pd.to_datetime(df['Date'])
+df['MonthDate'] = pd.to_datetime(df['MonthDate'])
 
 print("Data loaded:")
 print(df.head())
@@ -42,7 +42,7 @@ def get_sentiment(text):
         return "Neutral"
 
 
-df['Sentiment'] = df['Feedback'].apply(get_sentiment)
+df['Sentiment'] = df['PainPoint'].apply(get_sentiment)
 
 print("\nSentiment added:")
 print(df.head())
@@ -54,7 +54,7 @@ print(df.head())
 
 vectorizer = TfidfVectorizer(stop_words='english')
 
-X = vectorizer.fit_transform(df['Feedback'])
+X = vectorizer.fit_transform(df['PainPoint'])
 
 kmeans = KMeans(n_clusters=3, random_state=42)
 
@@ -70,7 +70,7 @@ print(df.head())
 # 5. Detect Spikes
 # -------------------------------
 
-daily_counts = df.groupby([df['Date'], 'Cluster']).size().reset_index(name='Count')
+daily_counts = df.groupby([df['MonthDate'], 'Cluster']).size().reset_index(name='Count')
 
 threshold = 1.5
 
@@ -78,7 +78,7 @@ alerts = []
 
 for cluster in daily_counts['Cluster'].unique():
 
-    cluster_data = daily_counts[daily_counts['Cluster']==cluster].sort_values('Date')
+    cluster_data = daily_counts[daily_counts['Cluster']==cluster].sort_values('MonthDate')
 
     cluster_data['MovingAvg'] = cluster_data['Count'].rolling(7, min_periods=1).mean()
 
@@ -89,7 +89,7 @@ for cluster in daily_counts['Cluster'].unique():
     for index, row in spikes.iterrows():
 
         alerts.append(
-            f"Spike detected: Cluster {cluster} on {row['Date'].date()} with {row['Count']} complaints"
+            f"Spike detected: Cluster {cluster} on {row['MonthDate'].date()} with {row['Count']} complaints"
         )
 
 print("\nSpike Alerts:")
@@ -104,7 +104,7 @@ predictions = {}
 
 for cluster in daily_counts['Cluster'].unique():
 
-    cluster_data = daily_counts[daily_counts['Cluster']==cluster].sort_values('Date')
+    cluster_data = daily_counts[daily_counts['Cluster']==cluster].sort_values('MonthDate')
 
     cluster_data['DayIndex'] = np.arange(len(cluster_data))
 
@@ -125,7 +125,8 @@ for cluster in daily_counts['Cluster'].unique():
 
 print("\nPredictions for tomorrow:")
 print(predictions)
-
+# See what is in each cluster
+print(df.groupby('Cluster')['PainPoint'].unique())
 
 # -------------------------------
 # 7. Send Alert to Teams
