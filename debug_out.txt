@@ -1,0 +1,9 @@
+                    PainPoint  ...       Date
+0           M-PESA Pin Issues  ... 2026-03-08
+1  Sim Card Issues - SIM SWAP  ... 2026-03-08
+2         M-PESA Reversal-P2P  ... 2026-03-08
+3        LNM Paybill Reversal  ... 2026-03-08
+4         M-PESA Reversal-P2P  ... 2026-03-08
+5           M-PESA Pin Issues  ... 2026-03-08
+
+[6 rows x 8 columns]
