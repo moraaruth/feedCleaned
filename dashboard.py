@@ -5,7 +5,7 @@
 # ============================================
 import os
 import pandas as pd
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request
 
 ONEDRIVE = r"C:\Users\RMNYANGAU\OneDrive - SAFARICOM PLC"
 
@@ -400,6 +400,21 @@ def api_data():
         "predictions": predictions,
         "last_run":    last_run,
     })
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    data = request.json
+
+    return jsonify({
+        "top_issue": "SIM & SWAP",
+        "trend": "Rising",
+        "severity": "Medium",
+        "recommendation": "Prepare support teams"
+    })
+
+
+    return jsonify(result)
+
 if __name__ == "__main__":
     import webbrowser, threading
     threading.Timer(1, lambda: webbrowser.open("http://localhost:5000")).start()
