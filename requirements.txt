@@ -3,3 +3,4 @@ gunicorn
 pandas
 numpy
 scikit-learn
+openpyxl==3.1.2
