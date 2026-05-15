@@ -16,11 +16,53 @@ FILES = {
     "alerts":     os.path.join(ONEDRIVE, "AutoFeedbackAIAlerts.xlsx"),
 }
 
-def load(key):
+
+class DataLoader:
+  """Lightweight cached loader for Excel files.
+
+  Caches DataFrames keyed by FILES entry and reloads when the file's
+  modification time changes. This avoids repeated expensive Excel reads
+  while ensuring predictions use the latest data.
+  """
+  def __init__(self, files_map, reload_interval=5):
+    self.files = files_map
+    self._cache = {}
+    self._lock = threading.Lock()
+    self.reload_interval = reload_interval
+
+  def _get_mtime(self, path):
     try:
-        return pd.read_excel(FILES[key])
-    except:
-        return pd.DataFrame()
+      return os.path.getmtime(path)
+    except Exception:
+      return None
+
+  def get(self, key):
+    path = self.files.get(key)
+    if not path:
+      return pd.DataFrame()
+
+    now = time.time()
+    with self._lock:
+      entry = self._cache.get(key)
+      mtime = self._get_mtime(path)
+      # reload if not cached or file changed
+      if (entry is None) or (entry.get("mtime") != mtime):
+        try:
+          # read only; letting pandas infer dtypes is fine for small Excel files
+          df = pd.read_excel(path)
+        except Exception:
+          df = pd.DataFrame()
+        self._cache[key] = {"df": df, "mtime": mtime, "ts": now}
+      return self._cache[key]["df"]
+
+
+import threading, time, re
+
+# create a global loader instance
+_loader = DataLoader(FILES)
+
+def load(key):
+  return _loader.get(key)
 
 app = Flask(__name__)
 
@@ -403,42 +445,128 @@ def api_data():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.json
-    pred = load("predictions")
-    
-    if pred.empty or "Cluster" not in pred.columns:
-        return jsonify({"error": "No prediction data available"}), 400
-    
-    # Get latest predictions
-    pred["Date"] = pd.to_datetime(pred["Date"], errors="coerce")
-    latest = pred[pred["Date"] == pred["Date"].max()]
-    
-    if latest.empty:
-        return jsonify({"error": "No recent predictions"}), 400
-    
-    # Find issue with highest predicted volume
-    top_idx = latest["Predicted_Tomorrow"].idxmax()
-    top_issue = latest.loc[top_idx, "Cluster"]
-    trend = latest.loc[top_idx, "Trend"]
-    
-    # Determine severity based on volume
-    max_volume = latest.loc[top_idx, "Predicted_Tomorrow"]
-    severity = "Critical" if max_volume > 100 else "High" if max_volume > 50 else "Medium"
-    
-    # Generate recommendation based on trend
-    recommendation = {
-        "UP": "Prepare support teams — volume rising",
-        "DOWN": "Monitor but reduced urgency — volume falling",
-        "FLAT": "Maintain current staffing — stable volume"
-    }.get(trend, "Review trends")
-    
-    return jsonify({
-        "top_issue": str(top_issue),
-        "trend": str(trend),
-        "severity": severity,
-        "recommendation": recommendation,
-        "predicted_volume": int(max_volume) if pd.notna(max_volume) else 0
-    })
+  payload = request.get_json(silent=True) or {}
+
+  # Accept either 'cluster' (explicit) or 'text' (free text from Power App)
+  requested_cluster = None
+  text = None
+  if isinstance(payload, dict):
+    requested_cluster = payload.get("cluster") or payload.get("issue")
+    text = payload.get("text") or payload.get("context")
+
+  pred = load("predictions")
+  if pred.empty or "Cluster" not in pred.columns:
+    return jsonify({"error": "No prediction data available"}), 400
+
+  # normalize date and drop rows missing the predicted value
+  pred = pred.copy()
+  pred["Date"] = pd.to_datetime(pred["Date"], errors="coerce")
+  pred = pred.dropna(subset=["Date", "Predicted_Tomorrow"]) if "Predicted_Tomorrow" in pred.columns else pred
+  if pred.empty:
+    return jsonify({"error": "No valid prediction rows"}), 400
+
+  latest_date = pred["Date"].max()
+  prev_dates = sorted(pred["Date"].unique())
+  prev_date = prev_dates[-2] if len(prev_dates) >= 2 else None
+
+  latest = pred[pred["Date"] == latest_date]
+
+  # choose cluster
+  chosen = None
+  clusters = latest["Cluster"].astype(str).tolist()
+  if requested_cluster:
+    # exact match preferred
+    req = str(requested_cluster).strip()
+    if req in clusters:
+      chosen = req
+    else:
+      # case-insensitive match
+      low = {c.lower(): c for c in clusters}
+      chosen = low.get(req.lower())
+
+  if not chosen and text:
+    # simple keyword match against cluster names
+    txt = re.sub(r"[^a-z0-9 ]", " ", str(text).lower())
+    tokens = set(txt.split())
+    best = None
+    best_score = 0
+    for c in clusters:
+      cname = str(c).lower()
+      score = sum(1 for t in tokens if t in cname)
+      if score > best_score:
+        best_score = score
+        best = c
+    if best_score > 0:
+      chosen = best
+
+  # fallback to top predicted cluster
+  if not chosen:
+    top_idx = latest["Predicted_Tomorrow"].astype(float).idxmax()
+    chosen = str(latest.loc[top_idx, "Cluster"])
+
+  # collect latest & previous values for chosen cluster
+  row_latest = latest[latest["Cluster"].astype(str) == str(chosen)]
+  if row_latest.empty:
+    return jsonify({"error": "Requested cluster not found in latest predictions"}), 400
+  row_latest = row_latest.iloc[0]
+  predicted_volume = float(row_latest.get("Predicted_Tomorrow", 0) or 0)
+  declared_trend = str(row_latest.get("Trend", "FLAT")).upper() if "Trend" in row_latest.index else "FLAT"
+
+  prev_volume = None
+  if prev_date is not None:
+    prev = pred[pred["Date"] == prev_date]
+    prev_row = prev[prev["Cluster"].astype(str) == str(chosen)]
+    if not prev_row.empty:
+      prev_volume = float(prev_row.iloc[0].get("Predicted_Tomorrow", 0) or 0)
+
+  # compute change and trend
+  change_pct = None
+  if (prev_volume is not None) and (prev_volume > 0):
+    change_pct = (predicted_volume - prev_volume) / prev_volume
+  # primary source of trend is declared Trend column (if present), otherwise derive from change_pct
+  if declared_trend and declared_trend in {"UP", "DOWN", "FLAT"}:
+    trend = declared_trend
+  else:
+    if change_pct is None:
+      trend = "FLAT"
+    elif change_pct > 0.1:
+      trend = "UP"
+    elif change_pct < -0.1:
+      trend = "DOWN"
+    else:
+      trend = "FLAT"
+
+  # compute severity (rule-based): volume thresholds and change weight
+  severity = "Low"
+  vol = predicted_volume
+  if vol > 200 or (change_pct is not None and change_pct > 1.0):
+    severity = "Critical"
+  elif vol > 100 or (change_pct is not None and change_pct > 0.5):
+    severity = "High"
+  elif vol > 30 or (change_pct is not None and abs(change_pct) > 0.25):
+    severity = "Medium"
+
+  # recommendation rules
+  if trend == "UP" and severity in {"High", "Critical"}:
+    recommendation = "Scale support teams immediately; open incident channels"
+  elif trend == "UP":
+    recommendation = "Prepare additional shifts; monitor closely"
+  elif trend == "DOWN":
+    recommendation = "Monitor; consider reassigning resources to other queues"
+  else:
+    recommendation = "Stable — continue monitoring and validate predictions"
+
+  response = {
+    "top_issue": str(chosen),
+    "trend": trend,
+    "severity": severity,
+    "recommendation": recommendation,
+    "predicted_volume": int(predicted_volume),
+  }
+  if change_pct is not None:
+    response["change_pct"] = round(float(change_pct), 3)
+
+  return jsonify(response)
 
 if __name__ == "__main__":
     import webbrowser, threading
