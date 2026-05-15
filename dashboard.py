@@ -404,16 +404,41 @@ def api_data():
 @app.route("/predict", methods=["POST"])
 def predict():
     data = request.json
-
+    pred = load("predictions")
+    
+    if pred.empty or "Cluster" not in pred.columns:
+        return jsonify({"error": "No prediction data available"}), 400
+    
+    # Get latest predictions
+    pred["Date"] = pd.to_datetime(pred["Date"], errors="coerce")
+    latest = pred[pred["Date"] == pred["Date"].max()]
+    
+    if latest.empty:
+        return jsonify({"error": "No recent predictions"}), 400
+    
+    # Find issue with highest predicted volume
+    top_idx = latest["Predicted_Tomorrow"].idxmax()
+    top_issue = latest.loc[top_idx, "Cluster"]
+    trend = latest.loc[top_idx, "Trend"]
+    
+    # Determine severity based on volume
+    max_volume = latest.loc[top_idx, "Predicted_Tomorrow"]
+    severity = "Critical" if max_volume > 100 else "High" if max_volume > 50 else "Medium"
+    
+    # Generate recommendation based on trend
+    recommendation = {
+        "UP": "Prepare support teams — volume rising",
+        "DOWN": "Monitor but reduced urgency — volume falling",
+        "FLAT": "Maintain current staffing — stable volume"
+    }.get(trend, "Review trends")
+    
     return jsonify({
-        "top_issue": "SIM & SWAP",
-        "trend": "Rising",
-        "severity": "Medium",
-        "recommendation": "Prepare support teams"
+        "top_issue": str(top_issue),
+        "trend": str(trend),
+        "severity": severity,
+        "recommendation": recommendation,
+        "predicted_volume": int(max_volume) if pd.notna(max_volume) else 0
     })
-
-
-    return jsonify(result)
 
 if __name__ == "__main__":
     import webbrowser, threading
