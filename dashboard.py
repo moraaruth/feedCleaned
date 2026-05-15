@@ -12,9 +12,13 @@ ONEDRIVE = r"C:\Users\RMNYANGAU\OneDrive - SAFARICOM PLC"
 FILES = {
     "feedback":   os.path.join(ONEDRIVE, "AutoFeedbackAIInsightsOut.xlsx"),
     "decisions":  os.path.join(ONEDRIVE, "AutoFeedbackDecisionLogs.xlsx"),
-    "predictions":os.path.join(ONEDRIVE, "AutoFeedbackAIPredictions.xlsx"),
+  "predictions":os.path.join(ONEDRIVE, "AutoFeedbackAIPredictions.xlsx"),
     "alerts":     os.path.join(ONEDRIVE, "AutoFeedbackAIAlerts.xlsx"),
 }
+
+# Allow Render (or any deployment) to override the predictions path via env var
+if os.environ.get("PREDICTIONS_PATH"):
+  FILES["predictions"] = os.environ.get("PREDICTIONS_PATH")
 
 
 class DataLoader:
@@ -45,12 +49,22 @@ class DataLoader:
     with self._lock:
       entry = self._cache.get(key)
       mtime = self._get_mtime(path)
+      # If file can't be found (mtime is None): preserve cached DF if available
+      if mtime is None:
+        if entry is not None:
+          # return last known dataframe (stale) rather than overwriting with empty
+          return entry["df"]
+        else:
+          return pd.DataFrame()
+
       # reload if not cached or file changed
       if (entry is None) or (entry.get("mtime") != mtime):
         try:
-          # read only; letting pandas infer dtypes is fine for small Excel files
           df = pd.read_excel(path)
         except Exception:
+          # on read error, prefer previous cache if present
+          if entry is not None:
+            return entry["df"]
           df = pd.DataFrame()
         self._cache[key] = {"df": df, "mtime": mtime, "ts": now}
       return self._cache[key]["df"]
@@ -63,8 +77,77 @@ _loader = DataLoader(FILES)
 
 def load(key):
   return _loader.get(key)
-
+ 
 app = Flask(__name__)
+
+@app.route("/health")
+def health():
+  """Return status for configured files: existence, mtime, and row count.
+
+  This is useful on Render to verify that the OneDrive paths are accessible
+  and to detect stale or missing files.
+  """
+  out = {}
+  for k, p in FILES.items():
+    info = {"path": p, "exists": False, "mtime": None, "rows": None, "cached": False}
+    try:
+      info["exists"] = os.path.exists(p)
+      info["mtime"] = os.path.getmtime(p) if info["exists"] else None
+    except Exception:
+      info["exists"] = False
+    # check cache
+    cached = _loader._cache.get(k)
+    if cached:
+      info["cached"] = True
+      try:
+        df = cached.get("df")
+        info["rows"] = len(df) if df is not None else None
+      except Exception:
+        info["rows"] = None
+    else:
+      # attempt quick read to count rows without caching
+      if info["exists"]:
+        try:
+          df = pd.read_excel(p, nrows=1)
+          # we read at least 1 row; now count via iterator can be expensive — skip exact count
+          info["rows"] = ">=1"
+        except Exception:
+          info["rows"] = None
+    out[k] = info
+  return jsonify(out)
+
+
+@app.route("/upload_predictions", methods=["POST"]) 
+def upload_predictions():
+  """Upload a new predictions Excel file and refresh the cache.
+
+  Use multipart form-data with field name `file`.
+  """
+  if 'file' not in request.files:
+    return jsonify({'error': 'Missing file field (use form field "file")'}), 400
+  f = request.files['file']
+  if f.filename == '':
+    return jsonify({'error': 'Empty filename'}), 400
+
+  save_dir = os.environ.get('UPLOAD_DIR', os.getcwd())
+  os.makedirs(save_dir, exist_ok=True)
+  save_path = os.path.join(save_dir, f.filename)
+  try:
+    f.save(save_path)
+  except Exception as e:
+    return jsonify({'error': 'Failed to save file', 'details': str(e)}), 500
+
+  # Point FILES to the uploaded file (so other endpoints use it)
+  FILES['predictions'] = save_path
+
+  # load into cache
+  try:
+    df = pd.read_excel(save_path)
+  except Exception as e:
+    return jsonify({'error': 'Saved but failed to read uploaded file', 'details': str(e)}), 500
+
+  _loader._cache['predictions'] = {'df': df, 'mtime': os.path.getmtime(save_path), 'ts': time.time()}
+  return jsonify({'ok': True, 'path': save_path, 'rows': len(df)})
 
 HTML = """
 <!DOCTYPE html>
@@ -456,7 +539,12 @@ def predict():
 
   pred = load("predictions")
   if pred.empty or "Cluster" not in pred.columns:
-    return jsonify({"error": "No prediction data available"}), 400
+    # attempt to use cached copy if present
+    cached = _loader._cache.get("predictions")
+    if cached and cached.get("df") is not None and not cached.get("df").empty:
+      pred = cached.get("df")
+    else:
+      return jsonify({"error": "No prediction data available. Check file path or update predictions file."}), 503
 
   # normalize date and drop rows missing the predicted value
   pred = pred.copy()

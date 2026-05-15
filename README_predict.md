@@ -49,3 +49,14 @@ python tests/test_predict.py
 
 The test sends a sample request to `http://localhost:5000/predict` and validates the response keys.
 
+6) Upload new predictions file (quick fix for Render)
+
+If your Render instance cannot access OneDrive paths, upload the latest `AutoFeedbackAIPredictions.xlsx` to the running service:
+
+```bash
+curl -X POST http://localhost:5000/upload_predictions \
+  -F "file=@/path/to/AutoFeedbackAIPredictions.xlsx"
+```
+
+This saves the file on the server (current working directory by default), updates the service to use it, and refreshes the in-memory cache so `/predict` will use the newly uploaded data immediately.
+
